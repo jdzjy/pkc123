@@ -3,7 +3,6 @@ from pickle import NONE
 import requests
 import os
 import shutil
-#from bot115_offline import handle_ed2k_only
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import time
@@ -27,8 +26,6 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import threading
 import schedule
-import threading
-import schedule
 import json
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -44,7 +41,7 @@ logging.getLogger("httpx").setLevel(logging.ERROR)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 logging.getLogger("telebot").setLevel(logging.ERROR)
 
-version = "8.0.1"  
+version = "8.0.2"  
 newest_id = 50
 # 加载.env文件中的环境变量
 load_dotenv(dotenv_path="db/user.env",override=True)
@@ -355,6 +352,8 @@ def build_share_message(metadata, client, file_id, folder_name, file_name, share
             size_str = f"{total_size / (1024 * 1024 * 1024):.2f} GB"
         else:
             size_str = f"{total_size / (1024 * 1024 * 1024 * 1024):.2f} TB"
+
+        avg_size_str = get_formatted_size(avg_size)
         file_info_text = f"🎬 视频数量: {total_files_count} | 总大小: {size_str} | 平均大小：{avg_size_str} | 实际视频数量: {actual_video_count} | 已和谐：{total_files_count-actual_video_count}"
         file_info_text2 = f"🎬 视频数量: {total_files_count} | 总大小: {size_str} | 平均大小：{avg_size_str}" 
     share_message2 = share_message
@@ -574,6 +573,7 @@ while True and __name__ == "__mp_main__":
         commands = [
             BotCommand("start", "开始使用机器人"),
             BotCommand("share", "创建分享链接"),
+            BotCommand("sync189", "天翼转存文件夹秒传到123盘转存文件夹"),
             BotCommand("info", "打印当前账户的信息"),
             BotCommand("add", "添加123监控过滤词，发送/add可查看使用方法"),
             BotCommand("remove", "删除123监控过滤词，发送/remove可查看使用方法")
@@ -2524,6 +2524,327 @@ def extract_kuake_target_url(text):
 
     # 最终去重（保序）
     return list(dict.fromkeys(processed_links))
+
+# ================= [开始] 新增 sync189 逻辑 =================
+def clean_filename(name):
+    """
+    清洗文件名，去除非法字符
+    """
+    if not name:
+        return "Unknown_Folder"
+    
+    # 1. 去除首尾空格
+    name = name.strip()
+    
+    # 2. 替换非法字符 (Windows/网盘通用限制: \ / : * ? " < > |)
+    # 将它们替换为下划线 _
+    name = re.sub(r'[\\/:*?"<>|]', '_', name)
+    
+    # 3. 去除控制字符 (如换行符、制表符等)
+    name = re.sub(r'[\x00-\x1f\x7f]', '', name)
+    
+    # 4. 再次去除可能的首尾点号或空格
+    name = name.strip('. ')
+    
+    return name
+
+def find_child_folder_id(client, parent_id, folder_name):
+    """
+    在指定父目录下查找特定名称的子文件夹ID
+    用于解决文件夹已存在导致的创建失败问题
+    """
+    try:
+        # 使用 v2 接口列出文件
+        url = "https://open-api.123pan.com/api/v2/file/list"
+        
+        # 遍历几页，防止文件夹内容太多导致找不到（通常前100个就能找到）
+        last_file_id = 0
+        
+        # 最多往后翻3页(300个文件)，通常足够了
+        for _ in range(3): 
+            params = {
+                "parentFileId": parent_id,
+                "limit": 100,
+                "lastFileId": last_file_id,
+                "trashed": 0,
+                "orderBy": "fileId",
+                "orderDirection": "desc"
+            }
+            headers = {
+                "Authorization": f"Bearer {client.token}",
+                "Platform": "open_platform"
+            }
+            
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            res_json = resp.json()
+            
+            if res_json.get("code") != 0:
+                # 如果接口报错，停止查找
+                break
+                
+            file_list = res_json.get("data", {}).get("fileList", [])
+            if not file_list:
+                break
+                
+            for item in file_list:
+                # type=1 是文件夹，且名称完全匹配
+                if item.get("type") == 1 and item.get("filename") == folder_name:
+                    return item.get("fileId")
+            
+            # 获取下一页的游标
+            last_file_id = res_json.get("data", {}).get("lastFileId", 0)
+            if last_file_id == 0:
+                break
+                
+    except Exception as e:
+        logger.error(f"查找文件夹异常: {e}")
+        
+    return None
+
+# --- 全局锁，用于保护文件夹创建 ---
+folder_lock = threading.Lock()
+
+def get_progress_bar(current, total, length=15):
+    """生成进度条字符串 [████░░░░]"""
+    if total == 0:
+        return "[]"
+    percent = current / total
+    filled_length = int(length * percent)
+    bar = "█" * filled_length + "░" * (length - filled_length)
+    return f"[{bar}] {int(percent * 100)}%"
+
+def sync_file_worker(client123, file_info, root_123_pid, folder_cache):
+    """
+    [子线程工作函数] 处理单个文件的目录检查与秒传
+    """
+    try:
+        # === 1. 目录结构处理 (必须加锁) ===
+        relative_path = file_info.get('parent_path', '/').strip('/')
+        current_123_parent_id = root_123_pid
+
+        if relative_path:
+            # 涉及读取/写入 folder_cache 和 API 创建，必须互斥
+            with folder_lock:
+                path_parts = relative_path.split('/')
+                current_path_str = ""
+                
+                for raw_part in path_parts:
+                    if not raw_part: continue
+                    part = clean_filename(raw_part) # 需确保 clean_filename 已定义
+                    current_path_str += f"/{part}"
+                    
+                    # 查缓存
+                    if current_path_str in folder_cache:
+                        current_123_parent_id = folder_cache[current_path_str]
+                    else:
+                        # 查云端 / 创建
+                        new_folder_id = None
+                        found_id = find_child_folder_id(client123, current_123_parent_id, part)
+                        if found_id:
+                            new_folder_id = found_id
+                        else:
+                            try:
+                                resp = client123.fs_mkdir(part, parent_id=current_123_parent_id)
+                                if resp.get("code") == 0:
+                                    new_folder_id = resp["data"]["Info"]["FileId"]
+                            except Exception:
+                                pass # 线程中不宜过多打印创建失败日志
+                        
+                        if new_folder_id:
+                            folder_cache[current_path_str] = new_folder_id
+                            current_123_parent_id = new_folder_id
+                        else:
+                            # 失败回退到根目录
+                            current_123_parent_id = root_123_pid
+
+        # === 2. 执行秒传 (耗时操作，并行执行) ===
+        rapid_resp = client123.upload_file_fast(
+            file_name=file_info['file_name'],
+            parent_id=current_123_parent_id,
+            file_md5=robust_normalize_md5(file_info['md5']),
+            file_size=int(file_info['file_size']),
+            duplicate=1
+        )
+
+        is_success = False
+        if rapid_resp.get("code") == 0:
+            data = rapid_resp.get("data", {})
+            if data and (data.get("Reuse") or data.get("reuse")):
+                is_success = True
+        
+        if is_success:
+            return {"status": "success", "file_id": file_info['file_id'], "name": file_info['file_name']}
+        else:
+            return {"status": "fail", "name": file_info['file_name']}
+
+    except Exception as e:
+        return {"status": "error", "msg": str(e), "name": file_info['file_name']}
+
+from bot189 import Cloud189
+from concurrent.futures import ThreadPoolExecutor
+# [修改后 V5] 多线程并发 + 智能进度条反馈
+def process_189_to_123_sync(message):
+    user_id = message.from_user.id
+    target_189_pid = os.getenv("ENV_189_UPLOAD_PID", "")
+    root_123_pid = UPLOAD_TARGET_PID 
+
+    if not target_189_pid:
+        reply_thread_pool.submit(send_reply, message, "❌ 未配置 ENV_189_UPLOAD_PID")
+        return
+
+    # --- 1. 初始化天翼云 ---
+    client189 = Cloud189()
+    if not client189.check_cookie_valid():
+        env_189_id = os.getenv("ENV_189_CLIENT_ID", "")
+        env_189_secret = os.getenv("ENV_189_CLIENT_SECRET", "")
+        if env_189_id and env_189_secret:
+            logger.info("天翼云Cookie失效，尝试自动登录...")
+            if not client189.login(env_189_id, env_189_secret):
+                reply_thread_pool.submit(send_reply, message, "❌ 天翼云登录失败")
+                return
+        else:
+            reply_thread_pool.submit(send_reply, message, "❌ 天翼云Cookie失效")
+            return
+
+    # 发送初始消息并保存对象，后续用于编辑
+    status_msg = bot.reply_to(message, "♻️ 正在扫描天翼云盘源目录...")
+
+    # --- 2. 获取源文件 ---
+    try:
+        files_189 = client189.get_folder_files_for_transfer(target_189_pid)
+    except Exception as e:
+        bot.edit_message_text(f"❌ 扫描出错: {str(e)}", chat_id=status_msg.chat.id, message_id=status_msg.message_id)
+        return
+
+    if not files_189:
+        bot.edit_message_text("📂 天翼云源目录为空", chat_id=status_msg.chat.id, message_id=status_msg.message_id)
+        return
+
+    total_files = len(files_189)
+    bot.edit_message_text(f"📊 扫描到 {total_files} 个文件，准备启动 5 线程并发秒传...", chat_id=status_msg.chat.id, message_id=status_msg.message_id)
+
+    # --- 3. 初始化 123 客户端 & 准备工作 ---
+    client123 = init_123_client()
+    
+    success_count = 0
+    fail_count = 0
+    processed_count = 0
+    delete_list = []
+    folder_cache = {} 
+    
+    # 进度控制
+    last_update_time = 0
+    start_time = time.time()
+
+    # --- 4. 多线程执行同步 ---
+    # max_workers=5 推荐值，过高可能导致123接口限流
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        # 提交所有任务
+        futures = [
+            executor.submit(sync_file_worker, client123, f, root_123_pid, folder_cache) 
+            for f in files_189
+        ]
+        
+        # 处理结果 (as_completed 会在任务完成时立即 yield)
+        for future in concurrent.futures.as_completed(futures):
+            processed_count += 1
+            res = future.result()
+            
+            if res['status'] == 'success':
+                success_count += 1
+                delete_list.append(res['file_id'])
+                logger.info(f"✅ 秒传成功: {res['name']}")
+            else:
+                fail_count += 1
+                logger.warning(f"❌ 秒传失败: {res['name']} ({res.get('msg', 'unknown')})")
+
+            # --- 智能进度反馈 (每2秒更新一次消息) ---
+            current_time = time.time()
+            if current_time - last_update_time > 2 or processed_count == total_files:
+                last_update_time = current_time
+                
+                # 计算速度和剩余时间
+                elapsed = current_time - start_time
+                speed = processed_count / elapsed if elapsed > 0 else 0
+                eta = (total_files - processed_count) / speed if speed > 0 else 0
+                
+                # 生成进度条
+                progress_bar = get_progress_bar(processed_count, total_files)
+                
+                msg_text = (
+                    f"🚀 **同步进行中...**\n\n"
+                    f"{progress_bar}\n"
+                    f"🔢 进度: {processed_count}/{total_files}\n"
+                    f"✅ 成功: {success_count}  ❌ 失败: {fail_count}\n"
+                    f"⚡ 速度: {speed:.1f} 文件/秒\n"
+                    f"⏳ 剩余: {int(eta)} 秒"
+                )
+                
+                try:
+                    bot.edit_message_text(msg_text, chat_id=status_msg.chat.id, message_id=status_msg.message_id, parse_mode='Markdown')
+                except Exception:
+                    pass # 忽略编辑消息可能出现的网络错误
+
+    # --- 5. 清理天翼云源文件 ---
+    deleted_files_count = 0
+    cleaned_folders_count = 0
+    
+    if delete_list:
+        bot.edit_message_text(f"🗑️ 秒传完成，正在删除 {len(delete_list)} 个源文件...", chat_id=status_msg.chat.id, message_id=status_msg.message_id)
+        
+        # 批量删除（依然单线程分批处理，删除操作通常很快且并发容易触发风控）
+        batch_size = 50
+        for i in range(0, len(delete_list), batch_size):
+            batch_ids = delete_list[i:i + batch_size]
+            task_infos = [{"fileId": fid, "fileName": "del", "isFolder": 0} for fid in batch_ids]
+            try:
+                res = client189.delete_files(task_infos)
+                if res.get("success"):
+                    deleted_files_count += len(batch_ids)
+            except Exception as e:
+                logger.error(f"删除文件异常: {e}")
+            time.sleep(1)
+        
+        # 清理空文件夹
+        bot.edit_message_text("🧹 正在清理天翼云残留的空文件夹...", chat_id=status_msg.chat.id, message_id=status_msg.message_id)
+        try:
+            cleaned_folders_count = client189.delete_empty_folders(target_189_pid)
+        except Exception as e:
+            logger.error(f"清理空文件夹失败: {e}")
+
+    # --- 6. 最终战报 ---
+    total_time = int(time.time() - start_time)
+    result_msg = (
+        f"🏁 **189 -> 123 同步任务结束**\n\n"
+        f"⏱️ 耗时: {total_time} 秒\n"
+        f"📂 总文件: {total_files}\n"
+        f"✅ 秒传成功: {success_count}\n"
+        f"❌ 秒传失败: {fail_count}\n"
+        f"🗑️ 删除源文件: {deleted_files_count}\n"
+        f"🧹 清理空目录: {cleaned_folders_count}"
+    )
+    
+    # 删除之前的进度消息，发送最终战报
+    try:
+        bot.delete_message(chat_id=status_msg.chat.id, message_id=status_msg.message_id)
+    except:
+        pass
+    reply_thread_pool.submit(send_reply, message, result_msg)
+
+# [新增] 注册 /sync189 命令
+@bot.message_handler(commands=['sync189'])
+def handle_sync_189_command(message):
+    user_id = message.from_user.id
+    if user_id != TG_ADMIN_USER_ID:
+        reply_thread_pool.submit(send_reply, message, "🚫 您没有权限执行此操作")
+        return
+    
+    reply_thread_pool.submit(send_reply, message, "⏳ 收到同步指令，正在后台启动处理进程...")
+    
+    # 在新线程中运行，防止阻塞Bot主进程
+    threading.Thread(target=process_189_to_123_sync, args=(message,)).start()
+
+# ================= [结束] 新增 sync189 逻辑 =================
 
 from quark_export_share import export_share_info
 from share import TMDBHelper
@@ -4582,7 +4903,8 @@ def main():
     except Exception as e:
         logger.error(f"程序异常终止: {str(e)}")
         #notifier.send_message(f"tgto123：程序异常终止: {str(e)}")
-        
+
+    
 from ptto115 import ptto123process
 def ptto123():
     while get_int_env("ENV_PTTO123_SWITCH", 0) or get_int_env("ENV_PTTO115_SWITCH", 0):
@@ -4637,7 +4959,7 @@ if __name__ == "__main__":
             markup.row(InlineKeyboardButton("📖 使用说明", callback_data="show_usage"),
                        InlineKeyboardButton("⚠️ 免责声明", callback_data="show_disclaimer"))
             markup.row(InlineKeyboardButton("🤖 人形命令", callback_data="show_userbot_help"),
-                       InlineKeyboardButton("🌟 项目地址", url="https://www.123684.com/s/IpPUVv-IVDj?pwd=JZMM"))
+                       InlineKeyboardButton("🌟 项目地址", url="https://t.me/xx123pan1"))
             
             # 发送简洁的启动消息
             bot.send_message(
