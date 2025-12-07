@@ -16,7 +16,7 @@ env:
   # TODO: 修改 1 - 这里改为您的 Docker Hub 用户名/镜像名
   DOCKER_IMAGE: jdzjy/pkc123bot
   # TODO: 修改 2 - 确认包含您需要支持的所有架构
-  PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   build:
@@ -43,8 +43,6 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
       
-      # TODO: 修改 3 - 确认您的 Python 主程序文件名是否为 tgto123.py
-      # 如果您的仓库里文件名是 main.py，请将下方的 tgto123.py 改为 main.py
       - name: Get version from code
         id: get_version
         run: |
@@ -96,5 +94,6 @@ jobs:
           repository: ${{ env.DOCKER_IMAGE }}
           readme-filepath: ./DOCKER_README.md
           short-description: 'Telegram 云盘自动转存机器人'
+
 
 
