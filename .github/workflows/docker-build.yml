@@ -9,10 +9,14 @@ on:
   pull_request:
     branches:
       - main
+  # 允许手动触发构建
+  workflow_dispatch:
 
 env:
-  DOCKER_IMAGE: pkc123/123bot
-  PLATFORMS: linux/amd64,linux/arm64
+  # TODO: 修改 1 - 这里改为您的 Docker Hub 用户名/镜像名
+  DOCKER_IMAGE: jdzjy/pkc123bot
+  # TODO: 修改 2 - 确认包含您需要支持的所有架构
+  PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7
 
 jobs:
   build:
@@ -35,15 +39,23 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
+          # 需要在 GitHub 仓库 Settings -> Secrets 中设置这两个变量
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
       
+      # TODO: 修改 3 - 确认您的 Python 主程序文件名是否为 tgto123.py
+      # 如果您的仓库里文件名是 main.py，请将下方的 tgto123.py 改为 main.py
       - name: Get version from code
         id: get_version
         run: |
-          VERSION=$(grep -oP 'version = "\K[^"]+' tgto123.py)
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Detected version: $VERSION"
+          if [ -f "123bot.py" ]; then
+            VERSION=$(grep -oP 'version = "\K[^"]+' 123bot.py)
+            echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+            echo "Detected version: $VERSION"
+          else
+            echo "Warning: Version file not found, using ref name or latest"
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
       
       - name: Extract metadata
         id: meta
@@ -55,7 +67,6 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
             type=raw,value=${{ steps.get_version.outputs.VERSION }},enable={{is_default_branch}}
             type=raw,value=latest,enable={{is_default_branch}}
       
@@ -73,18 +84,15 @@ jobs:
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             VCS_REF=${{ github.sha }}
       
-      - name: Image digest
-        run: echo ${{ steps.meta.outputs.digest }}
-      
+      # 更新 Docker Hub 描述（可选步骤）
+      # 如果您没有 DOCKER_README.md 文件，或者不需要同步描述，建议删除此步骤
       - name: Update Docker Hub Description
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: peter-evans/dockerhub-description@v3
+        continue-on-error: true  # 防止因为描述更新失败导致整个流程失败
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
           repository: ${{ env.DOCKER_IMAGE }}
           readme-filepath: ./DOCKER_README.md
-          short-description: 'Telegram 云盘自动转存机器人 - 支持 123/115/189 云盘自动转存、离线下载、秒传和 302 播放'
-
-
-
+          short-description: 'Telegram 云盘自动转存机器人'
