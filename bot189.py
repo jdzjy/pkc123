@@ -85,6 +85,7 @@ class BatchSaveTask:
         self.walkDirNum = 0
         self.saveDirNum = 0
         self.failed = False
+        self.error_msg = ""  # [新增] 用于存储具体的错误原因
         self.threadPool = ThreadPoolExecutor(max_workers=maxWorkers)
         self.tq = tqdm(desc='正在保存')
 
@@ -131,8 +132,8 @@ class BatchSaveTask:
             while self.getTaskNum() > 0:
                 time.sleep(checkInterval)
             self.threadPool.shutdown()
-        # 直接返回成功与否，不再统计文件数和大小
-        return not self.failed
+        # [修改] 返回元组 (是否成功, 错误信息)
+        return not self.failed, self.error_msg
 
     def __testAndSaveDir(self, folderInfo, targetFolderId):
         try:
@@ -154,17 +155,26 @@ class BatchSaveTask:
                             self.threadPool.submit(self.__batchSave, nextFolderId, shareFolderId)
                             return
                         else:
+                            self.error_msg = f"创建文件夹失败: {folderName}"
                             log.error(f"failed to create folder[{folderInfo}] at [{targetFolderId}]")
                             self.failed = True
                     except Exception as e1:
+                        self.error_msg = f"创建文件夹异常: {e1}"
                         log.error(f"failed to create folder[{folderInfo}] at [{targetFolderId}]: {e1}")
                         self.failed = True
                 else:
-                    log.error(f"save dir response unknown code: {code}")
+                    # [新增] 空间不足判断
+                    if code == "InsufficientStorageSpace":
+                        self.error_msg = "❌ 天翼云盘空间不足"
+                    else:
+                        self.error_msg = f"保存目录失败 Code: {code}"
+                    
+                    log.error(f"save dir response error: {code}")
                     self.failed = True
             else:
                 self.__incSaveDirNum()
         except Exception as e2:
+            self.error_msg = f"处理目录异常: {e2}"
             log.error(f"TestAndSaveDir occurred exception: {e2}")
             self.failed = True
         finally:
@@ -183,10 +193,16 @@ class BatchSaveTask:
                 )
             code = self.shareInfo.saveShareFiles(taskInfos, targetFolderId)
             if code:
-                log.error(f"save only files response unexpected code [num={len(saveFiles)}][code: {code}]")
+                # [新增] 空间不足判断
+                if code == "InsufficientStorageSpace":
+                    self.error_msg = "❌ 天翼云盘空间不足"
+                else:
+                    self.error_msg = f"保存文件失败 Code: {code}"
+                
+                log.error(f"save only files response error [num={len(saveFiles)}][code: {code}]")
                 self.failed = True
-            # 不再统计文件大小
         except Exception as e1:
+            self.error_msg = f"保存文件异常: {e1}"
             log.error(f"mustSave occurred exception: {e1}")
             self.failed = True
         finally:
@@ -216,6 +232,7 @@ class BatchSaveTask:
                 self.threadPool.submit(self.__testAndSaveDir, folderInfo, targetFolderId)
             return
         except Exception as e1:
+            self.error_msg = f"遍历目录异常: {e1}"
             log.error(f"batchSave occurred exception: {e1}")
         finally:
             self.__incTaskNum(-1)
@@ -254,17 +271,23 @@ class Cloud189ShareInfo:
             })
             result = self.client._parse_json(response)
             
+            # === [新增] 调试代码：打印异常的响应内容 ===
+            if result.get('res_code') is None:
+                log.error(f"🛑【调试信息】API响应异常，完整内容: {result}")
+            # ========================================
+            
             if result.get('res_code') != 0:
                 # 打印更详细的错误日志
                 error_msg = result.get('res_message', 'Unknown Error')
-                log.error(f"获取文件列表失败: {error_msg} (Code: {result.get('res_code')})")
-                raise Exception(error_msg)
             
             if not isinstance(result.get("fileListAO"), dict):
-                log.error(f"Invalid fileListAO format: {result}")
-                break
+                error_info = f"Invalid fileListAO format: {result}"
+                log.error(error_info)
+                # === [修改] 遇到严重错误直接抛出异常，通知上层任务失败 ===
+                raise Exception(error_info) 
             
             fileListAO = result["fileListAO"]
+
             current_files = fileListAO.get("fileList", [])
             current_folders = fileListAO.get("folderList", [])
             
@@ -394,7 +417,7 @@ class Cloud189:
     def login(self, username, password):
         # 登录前再次检查 Cookie，如果有效直接返回
         if self.check_cookie_valid():
-            logger.info("Cookie 有效，跳过账号密码登录")
+            logger.info("天翼云盘Cookie 有效，跳过账号密码登录")
             return True
 
         notifier = TelegramNotifier(TG_BOT_TOKEN, TG_ADMIN_USER_ID)
@@ -904,15 +927,18 @@ def save_189_link(client : Cloud189, link, parentFolderId):
         return False
     else:
         log.info("开始转储分享文件...")
-        # [修改] 只返回成功/失败
-        success = info.createBatchSaveTask(saveDir, 500, maxWorkers=5).run()
+        
+        # [修改] 接收元组返回值 (success, msg)
+        success, error_msg = info.createBatchSaveTask(saveDir, 500, maxWorkers=5).run()
         
         if success:
             log.info("所有分享文件已保存.")
             return True
         else:
-            log.error("保存分享文件出现错误")
-            notifier.send_message(f"保存分享文件出现错误")
+            # [修改] 使用具体的错误信息
+            final_msg = f"保存分享文件失败: {error_msg}" if error_msg else "保存分享文件出现未知错误"
+            log.error(final_msg)
+            notifier.send_message(final_msg)
             return False
 
 def init_database():
@@ -1062,13 +1088,13 @@ if __name__ == '__main__':
 
     # 1. 优先尝试 Cookie 登录
     if client.check_cookie_valid():
-        logger.info("Cookie 有效，登录成功")
+        logger.info("天翼云盘Cookie 有效，登录成功")
         login_success = True
     
     # 2. 如果 Cookie 无效，且配置了账号密码，尝试账号密码登录
     elif ENV_189_CLIENT_ID and ENV_189_CLIENT_SECRET:
         try:
-            logger.info("Cookie 无效或未配置，尝试账号密码登录...")
+            logger.info("天翼云盘Cookie 无效或未配置，尝试账号密码登录...")
             if client.login(ENV_189_CLIENT_ID, ENV_189_CLIENT_SECRET):
                 login_success = True
             else:
