@@ -41,7 +41,7 @@ logging.getLogger("httpx").setLevel(logging.ERROR)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 logging.getLogger("telebot").setLevel(logging.ERROR)
 
-version = "8.0.2"  
+version = "8.0.3"  
 newest_id = 50
 # 加载.env文件中的环境变量
 load_dotenv(dotenv_path="db/user.env",override=True)
@@ -4276,331 +4276,321 @@ def process_json_file(message):
             logger.error(f"处理JSON文件全局异常: {str(e)}")
             reply_thread_pool.submit(send_reply, message, f"❌ 处理异常: {str(e)}")
 
-def save_json_file_quark(message,json_data):
-    logger.info("进入123转存夸克")
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+link_process_lock = threading.Lock()
+quark_folder_lock = threading.Lock()
+def process_single_quark_file(client, file_info, common_path, target_dir_id, folder_cache, uses_v2_etag):
+    """
+    [新增] 单个夸克文件处理函数 (用于多线程并发)
+    """
+    file_path = file_info.get('path', '')
+    
+    # 构建完整文件路径
+    if common_path:
+        file_path = f"{common_path}/{file_path}"
+    etag = file_info.get('etag', '')
+    size = int(file_info.get('size', 0))
+
+    if not all([file_path, etag, size]):
+        return {"success": False, "file_name": file_path or "未知文件", "error": "文件信息不完整", "path": file_path}
+
     try:
-        # 开始计时
-        start_time = time.time()
-        # 提取commonPath、files、totalFilesCount和totalSize
-        common_path = json_data.get('commonPath', '').strip()
-        if common_path.endswith('/'):
-            common_path = common_path[:-1]
+        # --- 1. 目录结构处理 (线程安全区) ---
+        path_parts = file_path.split('/')
+        file_name = path_parts.pop()
+        parent_id = target_dir_id
+        
+        current_path = ""
+        # 遍历路径创建目录
+        for part in path_parts:
+            if not part: continue
+            current_path = f"{current_path}/{part}" if current_path else part
+            cache_key = f"{parent_id}/{current_path}"
+
+            # 加锁检查/创建目录，防止多线程竞争导致重复创建
+            with quark_folder_lock:
+                if cache_key in folder_cache:
+                    parent_id = folder_cache[cache_key]
+                else:
+                    # 创建新文件夹（带重试）
+                    mk_retry = 2
+                    folder_id = None
+                    while mk_retry > 0:
+                        try:
+                            # 尝试创建
+                            folder = client.fs_mkdir(part, parent_id=parent_id, duplicate=1)
+                            # 简单的检查，不做耗时的 check_response
+                            if folder.get("code") == 0:
+                                folder_id = folder["data"]["Info"]["FileId"]
+                                break
+                            else:
+                                mk_retry -= 1
+                                time.sleep(0.5)
+                        except Exception:
+                            mk_retry -= 1
+                            time.sleep(0.5)
+                    
+                    if folder_id:
+                        folder_cache[cache_key] = folder_id
+                        parent_id = folder_id
+                    else:
+                        # 创建失败则沿用上级ID，防止整条路径失败
+                        pass
+
+        # --- 2. 处理ETag ---
+        if uses_v2_etag:
+            etag = optimized_etag_to_hex(etag, True)
+        
+        final_md5 = robust_normalize_md5(etag)
+
+        # --- 3. 执行秒传 (耗时操作，并发执行) ---
+        retry_count = 3
+        rapid_resp = None
+        
+        while retry_count > 0:
+            try:
+                rapid_resp = client.upload_file_fast(
+                    file_name=file_name,
+                    parent_id=parent_id,
+                    file_md5=final_md5,
+                    file_size=size,
+                    duplicate=1
+                )
+                
+                # 成功判断 (Reuse=True)
+                if rapid_resp.get("code") == 0 and \
+                   (rapid_resp.get("data", {}).get("Reuse") or rapid_resp.get("data", {}).get("reuse")):
+                    return {
+                        "success": True, 
+                        "file_name": file_path, 
+                        "size": size, 
+                        "skip": rapid_resp.get("data", {}).get("Skip", False),
+                        "file_id": rapid_resp.get("data", {}).get("FileId", "")
+                    }
+                
+                # 明确的失败 (Reuse=False)
+                if rapid_resp.get("code") == 0:
+                     return {
+                        "success": False, 
+                        "file_name": file_path, 
+                        "error": "云端无此文件，秒传失败"
+                    }
+                
+                # 其他API错误，重试
+                retry_count -= 1
+                time.sleep(2)
+                
+            except Exception as e:
+                retry_count -= 1
+                time.sleep(2)
+                if retry_count == 0:
+                    return {"success": False, "file_name": file_path, "error": str(e)}
+
+        return {"success": False, "file_name": file_path, "error": rapid_resp.get("message", "请求超时") if rapid_resp else "未知错误"}
+
+    except Exception as e:
+        return {"success": False, "file_name": file_path, "error": f"处理异常: {str(e)}"}
+
+
+def save_json_file_quark(message, json_data):
+    logger.info("进入123转存夸克 (智能重试版 V5 - 直接发送JSON)")
+    try:
+        # 1. 基础数据提取
+        origin_common_path = json_data.get('commonPath', '').strip()
+        if origin_common_path and not origin_common_path.endswith('/'):
+            origin_common_path += '/'
+            
         files = json_data.get('files', [])
         uses_v2_etag = json_data.get('usesBase62EtagsInExport', False)
-        total_files_count = json_data.get('totalFilesCount', len(files))
-        total_size_json = json_data.get('totalSize', 0)
+        total_files_count = len(files)
 
         if not files:
-            # 使用线程池发送回复
             reply_thread_pool.submit(send_reply, message, "夸克分享中没有找到文件信息。")
             return
 
-        # 使用线程池发送回复
-        reply_thread_pool.submit(send_reply_delete, message, f"开始123转存夸克文件中的{len(files)}个文件...")
+        # 发送初始消息
+        status_msg_text = f"🚀 开始转存夸克文件 (共 {total_files_count} 个)...\n⚡️ 正在启动多线程加速..."
+        reply_thread_pool.submit(send_reply_delete, message, status_msg_text)
+        
         start_time = time.time()
-        # 初始化123客户端
         client = init_123_client()
 
-        # 转存文件
+        # 2. 初始化统计变量
         results = []
-        total_files = len(files)
-        message_batch = []  # 用于存储每批消息(包括成功和失败)
-        batch_size = 0      # 批次大小计数器
-        total_size = 0      # 累计成功转存文件体积(字节)
-        skip_count = 0      # 跳过的重复文件数量
-        last_etag = None    # 上一个成功转存文件的etag
-
-        # 创建文件夹缓存
+        total_size = 0
+        skip_count = 0
+        success_count = 0
+        fail_count = 0
+        
+        # 用于收集失败文件的列表
+        failed_files_data = []
+        
+        # 文件夹缓存
         folder_cache = {}
-        target_dir_name = common_path if common_path else 'JSON转存'
-        # 使用UPLOAD_TARGET_PID作为根目录
         target_dir_id = get_int_env("ENV_123_KUAKE_UPLOAD_PID", 0)
-
-        for i, file_info in enumerate(files):
-            file_path = file_info.get('path', '')
+        
+        # 3. 启动多线程
+        max_workers = 5  
+        
+        processed_count = 0
+        last_report_time = 0
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交任务
+            future_to_file = {
+                executor.submit(
+                    process_single_quark_file, 
+                    client, 
+                    file_info, 
+                    origin_common_path, 
+                    target_dir_id, 
+                    folder_cache, 
+                    uses_v2_etag
+                ): file_info for file_info in files
+            }
             
-            # 构建完整文件路径
-            if common_path:
-                file_path = f"{common_path}/{file_path}"
-            etag = file_info.get('etag', '')
-            size = int(file_info.get('size', 0))
-
-            if not all([file_path, etag, size]):
-                results.append({
-                    "success": False,
-                    "file_name": file_path or "未知文件",
-                    "error": "文件信息不完整"
-                })
-                continue
-
-            try:
-                # 处理文件路径
-                path_parts = file_path.split('/')
-                file_name = path_parts.pop()
-                parent_id = target_dir_id
-
-                # 创建目录结构
-                current_path = ""
-                for part in path_parts:
-                    if not part:
-                        continue
-
-                    current_path = f"{current_path}/{part}" if current_path else part
-                    cache_key = f"{parent_id}/{current_path}"
-
-                    # 检查缓存
-                    if cache_key in folder_cache:
-                        parent_id = folder_cache[cache_key]
-                        continue
-
-                    # 创建新文件夹（带重试）
-                    retry_count = 3
-                    folder = None
-                    while retry_count > 0:
-                        try:
-                            folder = client.fs_mkdir(part, parent_id=parent_id, duplicate=1)     
-                            time.sleep(0.2)                  
-                            check_response(folder)
-                            break
-                        except Exception as e:
-                            retry_count -= 1
-                            logger.warning(f"创建文件夹 {part} 失败 (剩余重试: {retry_count}): {str(e)}")
-                            time.sleep(31)
-
-                    if not folder:
-                        logger.warning(f"创建文件夹失败: {part}，将使用当前目录")
-                    else:
-                        folder_id = folder["data"]["Info"]["FileId"]
-                        folder_cache[cache_key] = folder_id
-                        parent_id = folder_id
-                    #time.sleep(1/get_int_env("ENV_FILE_PER_SECOND", 5))  # 避免限流
-
-                # 处理ETag
-                if uses_v2_etag:
-                    # 实现Base62 ETag转Hex（参考123pan_bot中的实现）
-                    etag = optimized_etag_to_hex(etag, True)
-
-                # 秒传文件（带重试）
-                retry_count = 3
-                rapid_resp = None
-                while retry_count > 0:
-                    # 检查etag是否与上一个成功转存的文件相同
-                    if last_etag == etag:
+            for future in as_completed(future_to_file):
+                processed_count += 1
+                file_info = future_to_file[future]
+                res = future.result()
+                
+                if res['success']:
+                    success_count += 1
+                    if res.get('skip'):
                         skip_count += 1
-                        logger.info(f"跳过重复文件: {file_path}")
-                        rapid_resp = {"data": {"Reuse": True, "Skip": True}, "code": 0}  # 标记为跳过
-                        break
-                    
-                    try:
-                        rapid_resp = client.upload_file_fast(
-                            file_name=file_name,
-                            parent_id=parent_id,
-                            file_md5=robust_normalize_md5(etag),
-                            file_size=size,
-                            duplicate=1
-                        )
-                        check_response(rapid_resp)
-                        break
-                    except Exception as e:
-                        retry_count -= 1
-                        logger.warning(f"转存文件 {file_name} 失败 (剩余重试: {retry_count}): {str(e)}")
-                        if rapid_resp and ("同名文件" in rapid_resp.get("message", {})):
-                            reply_thread_pool.submit(send_reply, message, rapid_resp.get("message", {}))
-                        if rapid_resp and ("Etag" in rapid_resp.get("message", {})):
-                            break
-                        if rapid_resp and ("文件信息" in rapid_resp.get("message", {})):
-                            reply_thread_pool.submit(send_reply, message, "请检查夸克的Cookie是否过期，或是否添加- NO_PROXY=*.quark.cn")
-                            break
-                        time.sleep(31)
-
-                if rapid_resp is None:
-                    # 处理所有重试失败且 rapid_resp 为 None 的场景
-                    error_msg = "秒传失败：接口返回空值且重试耗尽"
-                    results.append({
-                        "success": False,
-                        "file_name": file_path,
-                        "error": error_msg
-                    })
-                    dir_path, file_name = os.path.split(file_path)
-                    msg = {
-                        'status': '❌',
-                        'dir': dir_path,
-                        'file': f"{file_name} ({error_msg})"
-                    }
-                    message_batch.append(msg)
-                    batch_size += 1
-                    logger.error(f"{msg['status']}:{msg['dir']}/{msg['file']}")
-                elif rapid_resp.get("code") == 0 and rapid_resp.get("data", {}) and rapid_resp.get("data", {}).get("Reuse", False):
-                    # 检查是否是跳过的文件
-                    if rapid_resp.get("data", {}).get("Skip"):
-                        # 解析路径结构
-                        dir_path, file_name = os.path.split(file_path)
-                        msg = {
-                            'status': '🔄',
-                            'dir': dir_path,
-                            'file': f"{file_name} (重复跳过)"
-                        }
-                        message_batch.append(msg)
-                        batch_size += 1
-                        logger.info(f"{msg['status']}:{msg['dir']}/{msg['file']}")
+                        logger.info(f"🔄 [夸克] 跳过重复: {res['file_name']}")
                     else:
-                        # 更新上一个成功转存文件的etag
-                        last_etag = etag
-                        results.append({
-                            "success": True,
-                            "file_name": file_path,
-                            "file_id": rapid_resp.get("data", {}).get("FileId", ""),
-                            "size": size
-                        })
-                        total_size += size
-                        # 解析路径结构
-                        dir_path, file_name = os.path.split(file_path)
-                        msg = {
-                            'status': '✅',
-                            'dir': dir_path,
-                            'file': file_name
-                        }
-                        message_batch.append(msg)
-                        batch_size += 1
-                        logger.info(f"{msg['status']}:{msg['dir']}/{msg['file']}")
-
+                        total_size += res['size']
+                        logger.info(f"✅ [夸克] 秒传成功: {res['file_name']}")
                 else:
-                    results.append({
-                        "success": False,
-                        "file_name": file_path,
-                        "error": "此文件在123服务器不存在，无法秒传" if rapid_resp.get("data", {}) and (rapid_resp.get("data", {}).get("Reuse", True) == False) else rapid_resp.get("message", "未知错误")
-                    })
-                    # 解析路径结构
-                    dir_path, file_name = os.path.split(file_path)
-                    msg = {
-                        'status': '❌',
-                        'dir': dir_path,
-                        'file': f"{file_name} ({"此文件在123服务器不存在，无法秒传" if rapid_resp.get("data", {}) and (rapid_resp.get("data", {}).get("Reuse", True) == False) else rapid_resp.get("message", "未知错误")})"
-                    }
-                    message_batch.append(msg)
-                    batch_size += 1
-                    logger.info(f"{msg['status']}:{msg['dir']}/{msg['file']}")
-                                    
-                # 每10条消息发送一次
-                if batch_size % 10 == 0:
-                    # 生成树状结构消息
-                    tree_messages = defaultdict(lambda: {'✅': [], '❌': [], '🔄': []})
-                    for entry in message_batch:
-                        tree_messages[entry['dir']][entry['status']].append(entry['file'])
-                    
-                    batch_msg = []
-                    for dir_path, status_files in tree_messages.items():
-                        for status, files in status_files.items():
-                            if files:
-                                batch_msg.append(f"--- {status} {dir_path}")
-                                for i, file in enumerate(files):
-                                    prefix = '      └──' if i == len(files)-1 else '      ├──'
-                                    batch_msg.append(f"{prefix} {file}")
-                    batch_msg = "\n".join(batch_msg)
-                    reply_thread_pool.submit(send_reply_delete, message, f"📊 {batch_size}/{total_files_count} ({int(batch_size/total_files_count*100)}%) 个文件已处理\n\n{batch_msg}")
-                    message_batch = []
-                time.sleep(1/get_int_env("ENV_FILE_PER_SECOND", 5))  # 避免限流
+                    fail_count += 1
+                    logger.warning(f"❌ [夸克] 秒传失败: {res['file_name']} ({res.get('error')})")
+                    failed_files_data.append(file_info)
+                
+                results.append(res)
+                
+                # 进度报告
+                current_time = time.time()
+                if current_time - last_report_time > 3 or processed_count == total_files_count:
+                    last_report_time = current_time
+                    percent = int(processed_count / total_files_count * 100)
+                    progress_msg = (
+                        f"📊 转存进度: {processed_count}/{total_files_count} ({percent}%)\n"
+                        f"✅ 成功: {success_count} (跳过 {skip_count})\n"
+                        f"❌ 失败: {fail_count}"
+                    )
+                    reply_thread_pool.submit(send_reply_delete, message, progress_msg)
 
-            except Exception as e:
-                    # 解析路径结构
-                    dir_path, file_name = os.path.split(file_path)
-                    msg = {
-                        'status': '❌',
-                        'dir': dir_path,
-                        'file': f"{file_name} ({str(e)})"
-                    }
-                    message_batch.append(msg)
-                    batch_size += 1
-                    logger.info(f"{msg['status']}:{msg['dir']}/{msg['file']}")
-                    results.append({
-                        "success": False,
-                        "file_name": file_path,
-                        "error": str(e)
-                    })
-                    # 每10条消息发送一次
-                    if batch_size % 10 == 0:
-                        # 生成树状结构消息
-                        tree_messages = defaultdict(lambda: {'✅': [], '❌': [], '🔄': []})
-                        for entry in message_batch:
-                            tree_messages[entry['dir']][entry['status']].append(entry['file'])
-                        
-                        batch_msg = []
-                        for dir_path, status_files in tree_messages.items():
-                            for status, files in status_files.items():
-                                if files:
-                                    batch_msg.append(f"--- {status} {dir_path}")
-                                    for i, file in enumerate(files):
-                                        prefix = '      └──' if i == len(files)-1 else '      ├──'
-                                        batch_msg.append(f"{prefix} {file}")
-                        batch_msg = "\n".join(batch_msg)
-                        reply_thread_pool.submit(send_reply_delete, message, f"📊 {batch_size}/{total_files_count} ({int(batch_size/total_files_count*100)}%) 个文件已处理\n\n{batch_msg}")
-                        message_batch = []
-                    time.sleep(1/get_int_env("ENV_FILE_PER_SECOND", 5))  # 避免限流
-
-        # 发送剩余的消息
-        if message_batch:
-            # 生成树状结构消息
-            tree_messages = defaultdict(lambda: {'✅': [], '❌': [], '🔄': []})
-            for entry in message_batch:
-                tree_messages[entry['dir']][entry['status']].append(entry['file'])
-            
-            batch_msg = []
-            for dir_path, status_files in tree_messages.items():
-                for status, files in status_files.items():
-                    if files:
-                        batch_msg.append(f"--- {status} {dir_path}")
-                        for i, file in enumerate(files):
-                            prefix = '      └──' if i == len(files)-1 else '      ├──'
-                            batch_msg.append(f"{prefix} {file}")
-            batch_msg = "\n".join(batch_msg)
-            reply_thread_pool.submit(send_reply_delete, message, f"📊 {batch_size}/{total_files_count} ({int(batch_size/total_files_count*100)}%) 个文件已处理\n\n{batch_msg}")
-
-        # 结束计时并计算耗时
+        # 4. 最终统计
         end_time = time.time()
         elapsed_time = end_time - start_time
+        
         hours, remainder = divmod(int(elapsed_time), 3600)
         minutes, seconds = divmod(remainder, 60)
         time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-        # 发送转存结果
-        success_count = sum(1 for r in results if r['success'])
-        fail_count = len(results) - success_count
-
-        # 将字节转换为GB (1GB = 1024^3 B)
         total_size_gb = total_size / (1024 ** 3)
         size_str = f"{total_size_gb:.2f}GB"
+        
+        result_msg = (
+            f"✅ 夸克转存任务完成！\n"
+            f"📂 总文件: {total_files_count}个\n"
+            f"✅ 成功: {success_count}个\n"
+            f"❌ 失败: {fail_count}个\n"
+            f"🔄 跳过重复: {skip_count}个\n"
+            f"📦 实际转存: {size_str}\n"
+            f"⏱️ 耗时: {time_str}"
+        )
+        reply_thread_pool.submit(send_reply, message, result_msg)
+        
+        # 5. [优化] 生成并发送失败文件列表 (直接发送JSON)
+        if fail_count > 0 and failed_files_data:
+            try:
+                # --- 计算新的 commonPath ---
+                full_paths = []
+                for f in failed_files_data:
+                    rel_path = f.get('path', '').replace('\\', '/')
+                    if origin_common_path:
+                        full_p = f"{origin_common_path}{rel_path}"
+                    else:
+                        full_p = rel_path
+                    full_paths.append(full_p)
+                
+                new_common_prefix = ""
+                if full_paths:
+                    try:
+                        new_common_prefix = os.path.commonpath(full_paths)
+                        new_common_prefix = new_common_prefix.replace('\\', '/')
+                        if new_common_prefix:
+                            new_common_prefix += '/'
+                    except ValueError:
+                        new_common_prefix = ""
+                
+                # --- 修正文件路径并强制字典顺序 ---
+                processed_files = []
+                total_retry_size = 0
+                for f, full_p in zip(failed_files_data, full_paths):
+                    if new_common_prefix and full_p.startswith(new_common_prefix):
+                        final_path = full_p[len(new_common_prefix):]
+                    else:
+                        final_path = full_p 
+                    
+                    # 显式按顺序构造字典: path -> etag -> size
+                    new_f = {
+                        "path": final_path,
+                        "etag": f.get('etag'),
+                        "size": f.get('size')
+                    }
+                    processed_files.append(new_f)
+                    total_retry_size += int(f.get('size', 0))
 
-        # 处理JSON文件中的总体积
-        total_size_json_gb = total_size_json / (1024 ** 3)
-        total_size_json_str = f"{total_size_json_gb:.2f}GB"
+                # --- 构造有序字典 (头部在最前，files在最后) ---
+                retry_json = {}
+                retry_json["usesBase62EtagsInExport"] = uses_v2_etag
+                retry_json["etagEncrypted"] = False
+                retry_json["commonPath"] = new_common_prefix
+                retry_json["totalFilesCount"] = len(processed_files)
+                retry_json["totalSize"] = total_retry_size
+                retry_json["files"] = processed_files 
+                
+                # --- 决定文件名 (后缀改为 .json) ---
+                if new_common_prefix:
+                    filename_base = new_common_prefix.strip('/')
+                    filename_base = re.sub(r'[\\/:*?"<>|]', '_', filename_base)
+                    retry_filename = f"{filename_base}.json"
+                else:
+                    timestamp = int(time.time())
+                    retry_filename = f"failed_files_{timestamp}.json"
+                
+                with open(retry_filename, 'w', encoding='utf-8') as f:
+                    json.dump(retry_json, f, ensure_ascii=False, indent=2)
+                
+                # --- 发送文件 ---
+                caption = (
+                    f"⚠️ `检测到 {fail_count} 个文件转存失败。`\n"
+                    f"📄 `已生成失败重试文件：{retry_filename}`\n"
+                    f"💡 `  👇👇👇食用方法👇👇👇`\n\n"
+                    f"`待 123 云盘资源更新后，直接将此 **JSON 文件转发给机器人** 即可重试。`\n"
+                )
+                
+                with open(retry_filename, 'rb') as f:
+                    bot.send_document(
+                        message.chat.id, 
+                        f, 
+                        caption=caption,
+                        parse_mode='Markdown'
+                    )
+                
+                os.remove(retry_filename)
+                
+            except Exception as e:
+                logger.error(f"生成失败重试文件出错: {e}")
+                reply_thread_pool.submit(send_reply, message, f"❌ 生成失败列表文件出错: {str(e)}")
 
-        # 计算平均文件大小
-        avg_size = total_size / success_count if success_count > 0 else 0
-        avg_size_gb = avg_size / (1024 ** 3)
-        avg_size_str = f"{avg_size_gb:.2f}GB" if avg_size_gb >= 0.01 else f"{avg_size / (1024 ** 2):.2f}MB"
-        # 添加跳过的重复文件数量显示
-        result_msg = f"✅ 123转存夸克完成！\n✅成功: {success_count}个\n❌失败: {fail_count}个\n🔄跳过同一目录下的重复文件: {skip_count}个\n📊成功转存体积: {size_str}\n📊平均文件大小: {avg_size_str}\n📝夸克分享理论文件数: {total_files_count}个\n⏱️耗时: {time_str}"
-        reply_thread_pool.submit(send_reply, message, f"{result_msg}")
-        time.sleep(0.5)
-        # 添加失败文件详情
-        if fail_count > 0:
-            failed_files = []
-            for result in results:
-                if not result["success"]:
-                    # 简化文件名显示
-                    file_name = result["file_name"]
-                    failed_files.append(f"• {file_name}（失败原因：{result['error']}）")
-            # 分批发送所有失败文件，每批最多10个
-            batch_size = 10
-
-            for idx in range(0, len(failed_files), batch_size):
-                batch = failed_files[idx:idx+batch_size]
-                batch_msg = "❌ 失败文件 (批次 {}/{}):\n".format((idx//batch_size)+1, (len(failed_files)+batch_size-1)//batch_size) + "\n".join(batch)
-                reply_thread_pool.submit(send_reply, message, batch_msg)
-                time.sleep(0.5)
     except Exception as e:
-        logger.error(f"处理夸克文件失败: {str(e)}")
-        reply_thread_pool.submit(send_reply, message, f"❌ 处理夸克文件失败:\n{str(e)}")
+        logger.error(f"夸克转存全局异常: {str(e)}")
+        reply_thread_pool.submit(send_reply, message, f"❌ 处理异常: {str(e)}")
 
 # Base62字符表（123云盘V2 API使用）
 BASE62_CHARS = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
