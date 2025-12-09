@@ -7,6 +7,7 @@ from quark import QuarkUcSDK
 import base64
 import time
 import asyncio
+import os
 import re
 
 # 从分享URL中提取分享ID和密码
@@ -29,9 +30,17 @@ def sanitize_string(s: str) -> str:
     返回:
         str: 清理后的字符串。
     """
-    # 将字符串编码为utf-8字节，将无效字符替换为'?'
-    # 然后再将字节解码回字符串
     return s.encode('utf-8', errors='replace').decode('utf-8')
+
+def should_skip_quark_file(filename):
+    env_filter = os.getenv("ENV_EXT_FILTER", "")
+    if not env_filter:
+        return False
+    skip_exts = [ext.strip().lower() for ext in env_filter.split(',') if ext.strip()]
+    if not filename:
+        return False
+    _, ext = os.path.splitext(filename)
+    return ext.lower() in skip_exts
 
 def export_share_info(share_url, cookie=""):
     json_data = {
@@ -73,9 +82,15 @@ def export_share_info(share_url, cookie=""):
                     is_recursion=True,
                 ):
                     # 基础信息
+                    # 提前获取 path/filename 并检查
+                    clean_path = sanitize_string(file_info["RootPath"].lstrip('/'))
+                    if should_skip_quark_file(clean_path):
+                        logger.info(f"🚫 [Quark] 过滤文件: {clean_path}")
+                        continue
+                    
                     file_base = {
                         "size": file_info["size"],
-                        "path": sanitize_string(file_info["RootPath"].lstrip('/')),
+                        "path": clean_path,
                     }
                     
                     # === 核心修复逻辑开始 ===
