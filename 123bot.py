@@ -65,23 +65,44 @@ formatter = MsFormatter(
 root_logger = logging.getLogger()  # 获取根日志器
 root_logger.setLevel(logging.INFO)  # 全局日志级别
 
-# ================= 屏蔽 Pyrogram 的 Peer id invalid 错误 =================
+# ================= [增强版] 屏蔽 Pyrogram Peer id 错误 =================
 class IgnorePeerIdError(logging.Filter):
-    """屏蔽 Pyrogram 的 Peer id invalid 错误"""
+    """
+    强力屏蔽 Pyrogram 的 Peer id invalid 错误
+    覆盖日志消息本体和异常堆栈详情
+    """
     def filter(self, record):
-        # 检查异常堆栈信息
-        if record.exc_info:
-            exc_text = str(record.exc_info)
-            if "Peer id invalid" in exc_text:
-                return False
-        # 检查日志消息
-        if "Peer id invalid" in str(record.msg):
+        # 1. 检查日志的主体消息 (使用 getMessage 获取完整格式化后的字符串)
+        if "Peer id invalid" in record.getMessage():
             return False
+
+        # 2. 检查异常堆栈信息
+        if record.exc_info:
+            exc_type, exc_value, exc_traceback = record.exc_info
+            # 直接检查异常对象的值
+            if exc_value and "Peer id invalid" in str(exc_value):
+                return False
+            #以此防万一，检查堆栈文本
+            if "Peer id invalid" in str(exc_traceback):
+                return False
+                
         return True
 
-# 将过滤器应用到 asyncio 和 pyrogram 日志器
-logging.getLogger("asyncio").addFilter(IgnorePeerIdError())
-logging.getLogger("pyrogram").addFilter(IgnorePeerIdError())
+# 定义需要屏蔽的 Logger 列表 (精准打击)
+target_loggers = [
+    "pyrogram", 
+    "pyrogram.dispatcher", 
+    "pyrogram.session.session",
+    "asyncio"
+]
+
+# 循环应用过滤器
+for logger_name in target_loggers:
+    logging.getLogger(logger_name).addFilter(IgnorePeerIdError())
+
+# 额外保险：尝试给根 Logger 也加上（防止有漏网之鱼冒泡上来）
+logging.getLogger().addFilter(IgnorePeerIdError())
+
 # ================= 新增代码结束 =================
 
 if __name__ == "__mp_main__":
