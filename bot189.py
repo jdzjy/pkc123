@@ -20,8 +20,8 @@ import re
 import schedule
 from dotenv import load_dotenv
 
-logger = logging.getLogger("bot189")
-log = logger
+logger = logging.getLogger(__name__)
+
 # 加载.env文件中的环境变量
 load_dotenv(dotenv_path="db/user.env", override=True)
 load_dotenv(dotenv_path="sys.env", override=True)
