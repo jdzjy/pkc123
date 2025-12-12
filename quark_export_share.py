@@ -81,12 +81,8 @@ def export_share_info(share_url, cookie=""):
                     is_get_folder=False,
                     is_recursion=True,
                 ):
-                    # 基础信息
-                    # 提前获取 path/filename 并检查
+
                     clean_path = sanitize_string(file_info["RootPath"].lstrip('/'))
-                    if should_skip_quark_file(clean_path):
-                        logger.info(f"🚫 [Quark] 过滤文件: {clean_path}")
-                        continue
                     
                     file_base = {
                         "size": file_info["size"],
