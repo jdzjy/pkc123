@@ -8,16 +8,16 @@
     <link rel="stylesheet" href="/static/styles.css">
     
     <style>
-        /* ================= 日志终端专业版样式 (VS Code 风格) ================= */
+        /* ================= 日志终端专业版样式 (配色优化版) ================= */
         :root {
-            --log-bg: #15192b;       
-            --log-hover: #1e2338;    
-            --log-border: #2a2f4a;      
-            --text-main: #d0d7de;    
-            --text-dim: #6c757d;     
-            --col-info: #58a6ff;     
-            --col-warn: #d29922;     
-            --col-error: #f85149;
+            --log-bg: #15192b;       /* 深蓝灰背景 */
+            --log-hover: #1e2338;    /* 悬停高亮 */
+            --log-border: #2a2f4a;   /* 边框色 */
+            --text-main: #d0d7de;    /* 主文本 */
+            --text-dim: #6c757d;     /* 次要文本 */
+            --col-info: #58a6ff;     /* INFO 蓝 */
+            --col-warn: #d29922;     /* WARN 黄 */
+            --col-error: #f85149;    /* ERROR 红 */
         }
 
         /* 日志容器 */
@@ -28,13 +28,13 @@
             box-shadow: 0 8px 24px rgba(0,0,0,0.4);
             display: flex;
             flex-direction: column;
-            height: 780px; /* 固定高度 */
+            height: 780px;
             font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
         }
 
         /* 顶部工具栏 */
         .log-toolbar {
-            background-color: #1a1f32; /* 比日志背景稍亮 */
+            background-color: #1a1f32;
             padding: 10px 16px;
             border-bottom: 1px solid var(--log-border);
             display: flex;
@@ -49,7 +49,7 @@
             gap: 12px;
         }
 
-        /* 下拉筛选框背景 */
+        /* 筛选下拉框 */
         .log-select {
             background-color: #252a40;
             color: #eee;
@@ -96,7 +96,7 @@
         .log-entry {
             display: flex;
             padding: 2px 16px;
-            border-left: 3px solid transparent; /* 状态指示条 */
+            border-left: 3px solid transparent;
             align-items: flex-start;
         }
         .log-entry:hover { background-color: var(--log-hover); }
@@ -138,13 +138,13 @@
         }
 
         /* --- 颜色定义 --- */
-        .mod-115 { background-color: #27ae60; }   /* 绿色 */
-        .mod-189 { background-color: #2980b9; }   /* 蓝色 */
-        .mod-quark { background-color: #16a085; } /* 青色 */
-        .mod-main { background-color: #d35400; }  /* 深橙 */
-        .mod-mp { background-color: #8e44ad; }    /* 紫色 */
-        .mod-web { background-color: #7f8c8d; }   /* 灰色 */
-        .mod-other { background-color: #57606f; } /* 深灰 */
+        .mod-115 { background-color: #27ae60; }
+        .mod-189 { background-color: #2980b9; }
+        .mod-quark { background-color: #16a085; }
+        .mod-main { background-color: #d35400; }
+        .mod-mp { background-color: #8e44ad; }
+        .mod-web { background-color: #7f8c8d; }
+        .mod-other { background-color: #57606f; }
 
         /* 级别高亮 */
         .level-WARNING { border-left-color: var(--col-warn); background: rgba(230, 162, 60, 0.05); }
@@ -155,10 +155,10 @@
         .level-ERROR .log-msg { color: #ffbaba; font-weight: bold; }
         .level-ERROR .log-time { color: #f56c6c; }
 
-        /* 堆栈跟踪 (Traceback) */
+        /* 堆栈跟踪 */
         .log-traceback {
             color: #ff9b9b;
-            padding-left: 215px; /* 对齐到消息内容区 */
+            padding-left: 215px;
             font-size: 12px;
             opacity: 0.9;
             background: rgba(255, 0, 0, 0.03);
@@ -184,36 +184,29 @@
             <nav class="nav-menu">
                 <div class="nav-label">系统管理</div>
                 <button type="button" class="nav-item active" data-target="web">
-                    <img src="/static/images/web.svg" class="nav-icon-img" alt="Web"> 
-                    <span>Web安全配置</span>
+                    <img src="/static/images/web.svg" class="nav-icon-img" alt="Web"> <span>Web安全配置</span>
                 </button>
                 <button type="button" class="nav-item" data-target="tg">
-                    <img src="/static/images/userbot.png" class="nav-icon-img" alt="TG"> 
-                    <span>TG 机器人/人形</span>
+                    <img src="/static/images/userbot.png" class="nav-icon-img" alt="TG"> <span>TG 机器人/人形</span>
                 </button>
                 
                 <div class="nav-label" style="margin-top: 15px;">网盘配置</div>
                 <button type="button" class="nav-item" data-target="123">
-                    <img src="/static/images/123.svg" class="nav-icon-img" alt="123"> 
-                    <span>123 云盘</span>
+                    <img src="/static/images/123.svg" class="nav-icon-img" alt="123"> <span>123 云盘</span>
                 </button>
                 <button type="button" class="nav-item" data-target="115">
-                    <img src="/static/images/115.png" class="nav-icon-img" alt="115"> 
-                    <span>115 网盘</span>
+                    <img src="/static/images/115.png" class="nav-icon-img" alt="115"> <span>115 网盘</span>
                 </button>
                 <button type="button" class="nav-item" data-target="ty">
-                    <img src="/static/images/189.svg" class="nav-icon-img" alt="189"> 
-                    <span>天翼云盘</span>
+                    <img src="/static/images/189.svg" class="nav-icon-img" alt="189"> <span>天翼云盘</span>
                 </button>
                 
                 <div class="nav-label" style="margin-top: 15px;">监控与维护</div>
                 <button type="button" class="nav-item" data-target="logs">
-                    <img src="/static/images/log.svg" class="nav-icon-img" alt="Log"> 
-                    <span>实时运行日志</span>
+                    <img src="/static/images/log.svg" class="nav-icon-img" alt="Log"> <span>实时运行日志</span>
                 </button>
                 <button type="button" class="nav-item" data-target="other">
-                    <img src="/static/images/gjsz.svg" class="nav-icon-img" alt="Other"> 
-                    <span>高级/其他配置</span>
+                    <img src="/static/images/gjsz.svg" class="nav-icon-img" alt="Other"> <span>高级/其他配置</span>
                 </button>
             </nav>
 
@@ -306,23 +299,7 @@
                     <div id="section-123" class="section-pane"></div>
                     <div id="section-115" class="section-pane"></div>
                     
-                    <div id="section-ty" class="section-pane">
-                        <div class="config-group tg-login-card" style="margin-bottom: 20px; padding: 20px; border-color: rgba(255, 115, 0, 0.3); background: linear-gradient(to bottom, var(--bg-card), rgba(255, 115, 0, 0.05));">
-                            <h3 style="font-size: 18px; margin-bottom: 15px; padding-bottom: 10px;"><i class="fas fa-key"></i> 天翼云盘登录</h3>
-                            <div id="ty-tab-manual">
-                                <div class="config-item" style="margin-bottom: 15px;">
-                                    <label style="margin-bottom: 8px; display: block; color: var(--text-main); font-weight: 500; font-size: 14px;">ENV_189_COOKIES (手动获取)</label>
-                                    <div class="comment" style="margin-bottom: 8px;">
-                                        PC浏览器登录 <a href="https://cloud.189.cn" target="_blank" style="color: #6366f1;">cloud.189.cn</a> -> F12抓包 -> 复制 main.action 的 Cookie 值。有效期约30天。
-                                    </div>
-                                    <input type="text" id="ty-manual-cookie" placeholder="例如：COOKIE_LOGIN_USER=...; COOKIES_guid=..." autocomplete="off">
-                                </div>
-                                <button type="button" class="btn-primary" style="width: 100%;" onclick="saveTyCookie()">
-                                    <i class="fas fa-save"></i> 保存 Cookie 并重启
-                                </button>
-                            </div>
-                        </div>
-                    </div>
+                    <div id="section-ty" class="section-pane"></div>
                     
                     <div id="section-logs" class="section-pane">
                         <div class="log-container-wrapper">
@@ -331,12 +308,14 @@
                                     <span style="font-weight: bold; color: #fff; font-size: 14px;"><i class="fas fa-terminal"></i> 终端</span>
                                     
                                     <select id="logFilter" class="log-select" onchange="applyLogFilter()">
-                                        <option value="all">🔍 显示全部模块</option>
+                                        <option value="all">🔍 显示全部日志</option>
+                                        <option value="error">❌ 只看错误 (ERROR)</option>
+                                        <option value="warning">⚠️ 只看警告 (WARN)</option>
+                                        <option value="hr" disabled>──────────</option>
+                                        <option value="mp_main">⚙️ 多进程主控</option>
+                                        <option value="main">🤖 123Bot核心</option>
                                         <option value="bot115">📂 115网盘</option>
                                         <option value="bot189">☁️ 天翼云盘</option>
-                                        <option value="quark">🪐 夸克网盘</option>
-                                        <option value="main">🤖 123Bot核心</option>
-                                        <option value="mp_main">⚙️ 多进程主控</option>
                                         <option value="werkzeug">🌐 Web服务器</option>
                                     </select>
 
@@ -386,14 +365,8 @@
 
     <script src="/static/script.js"></script>
     <script>
-        function submitForm() {
-            document.getElementById('env-form').dispatchEvent(new Event('submit'));
-        }
-        function logout() {
-            if (confirm('确定要退出管理后台吗？')) {
-                fetch('/api/logout', { method: 'POST' }).then(() => window.location.href = '/login');
-            }
-        }
+        function submitForm() { document.getElementById('env-form').dispatchEvent(new Event('submit')); }
+        function logout() { if(confirm('确定要退出管理后台吗？')) fetch('/api/logout', {method:'POST'}).then(()=>location.href='/login'); }
     </script>
 </body>
 </html>
