@@ -19,9 +19,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 checkTgStatus();
             }
             if(target === 'logs') {
-                loadLogs();
+                // 进入日志 Tab 时自动开启流
+                if(!eventSource) startLogStream();
             } else {
-                stopAutoRefresh();
+                // 离开日志 Tab 暂停流 (可选)
+                // stopLogStream();
             }            
         });
     });
@@ -55,14 +57,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     group.appendChild(header);
 
                     sections[sectionName].forEach(item => {
-                        if (item.key === 'ENV_189_COOKIES') {
-                            const manualInput = document.getElementById('ty-manual-cookie');
-                            if (manualInput) {
-                                manualInput.value = item.value || '';
-                            }
-                            return; 
-                        }
-
                         const div = document.createElement('div');
                         div.className = 'config-item';
                         const label = document.createElement('label');
@@ -198,7 +192,12 @@ function tgVerifyCode() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({code})
     })
-    .then(res => res.json())
+    .then(res => {
+        if (!res.ok) {
+            throw new Error(`Server error: ${res.status}`);
+        }
+        return res.json();
+    })
     .then(data => {
         hideLoading();
         if (data.success) {
@@ -260,28 +259,6 @@ function resetTgLogin() {
     document.getElementById('tg-password-input').value = '';
 }
 
-function saveTyCookie() {
-    const cookie = document.getElementById('ty-manual-cookie').value;
-    if (!cookie) return showNotification('Cookie 不能为空', 'error');
-    
-    showLoading();
-    fetch('/api/189/cookie/save', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ cookie })
-    })
-    .then(res => res.json())
-    .then(data => {
-        hideLoading();
-        if (data.success) {
-            showNotification(data.msg, 'success');
-            setTimeout(() => restartService(), 1500);
-        } else {
-            showNotification(data.msg, 'error');
-        }
-    });
-}
-
 function showLoading() { document.getElementById('loading').classList.add('show'); }
 function hideLoading() { document.getElementById('loading').classList.remove('show'); }
 function showNotification(msg, type) {
@@ -328,7 +305,6 @@ let isRenderPending = false;
 // 启动实时日志
 function startLogStream() {
     const viewer = document.getElementById('log-viewer');
-    const btn = document.getElementById('btn-log-switch');
     
     // 防止重复开启
     if (eventSource) return;
@@ -360,8 +336,8 @@ function startLogStream() {
         eventSource = null;
         if (viewer) {
             const errDiv = document.createElement('div');
-            errDiv.className = 'log-line error-line';
-            errDiv.innerHTML = '<span class="log-badge tag-other">SYSTEM</span> 连接已断开，请点击“开始实时”重连';
+            errDiv.className = 'log-entry level-ERROR item-other';
+            errDiv.innerHTML = '<span class="log-badge mod-web">SYSTEM</span> <span class="log-msg">连接已断开，请点击“开始实时”重连</span>';
             viewer.appendChild(errDiv);
         }
         updateLogBtnState(false);
@@ -381,10 +357,10 @@ function stopLogStream() {
     const viewer = document.getElementById('log-viewer');
     if(viewer) {
         const div = document.createElement('div');
-        div.className = 'log-line';
+        div.className = 'log-entry item-other';
         div.style.borderLeft = "3px solid #777";
         div.style.opacity = "0.7";
-        div.innerHTML = '<span class="log-badge tag-other">PAUSED</span> 实时流已暂停';
+        div.innerHTML = '<span class="log-badge mod-other">PAUSED</span> <span class="log-msg">实时流已暂停</span>';
         viewer.appendChild(div);
         viewer.scrollTop = viewer.scrollHeight;
     }
@@ -408,7 +384,6 @@ function updateLogBtnState(isRunning) {
         btn.classList.remove('btn-secondary');
         btn.classList.add('btn-success');
         btn.innerHTML = '<i class="fas fa-pause"></i> 暂停实时';
-        // 自动滚动开关：默认开启
         document.getElementById('auto-scroll-log').disabled = false;
     } else {
         btn.classList.remove('btn-success');
@@ -431,14 +406,13 @@ function processLogBuffer() {
 
     const fragment = document.createDocumentFragment();
     const filterValue = document.getElementById('logFilter').value;
-    const hideWerkzeug = document.getElementById('hide-werkzeug').checked;
-
+    
     // 取出缓冲区所有数据
     const batch = logBuffer.splice(0, logBuffer.length);
 
     batch.forEach(line => {
         if (!line.trim()) return;
-        const el = createLogLineElement(line, filterValue, hideWerkzeug);
+        const el = createLogLineElement(line, filterValue);
         fragment.appendChild(el);
     });
 
@@ -463,12 +437,14 @@ function processLogBuffer() {
     }
 }
 
-// 创建单行日志 DOM (解析逻辑)
-function createLogLineElement(line, filterValue, hideWerkzeug) {
+// 创建单行日志 DOM (解析逻辑 - 核心修复版)
+function createLogLineElement(line, filterValue) {
     // 正则解析：时间 - 模块 - 级别 - 内容
-    const logRegex = /^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}(?:,\d+)?)\s-\s(\S+)\s-\s([A-Z]+)\s-\s(.*)$/;
+    // 兼容: 2025-12-13 14:03:38.463 - __mp_main__ - INFO
+    const logRegex = /^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}(?:,\d+)?)\s+-\s+(\S+)\s+-\s+([A-Z]+)\s+-\s+(.*)$/;
     
     let category = 'other';
+    let displayCategory = 'OTHER'; // 用于显示的 Badge 文本
     let level = 'INFO';
     let timeStr = '';
     let msgStr = line;
@@ -477,55 +453,91 @@ function createLogLineElement(line, filterValue, hideWerkzeug) {
     const match = line.match(logRegex);
     if (match) {
         isFormatted = true;
-        timeStr = match[1].split(',')[0]; // 去掉毫秒
-        category = match[2];
+        timeStr = match[1].split(',')[0]; 
+        let rawCategory = match[2]; 
         level = match[3];
         msgStr = match[4];
+
+        // --- 1. 模块分类映射逻辑 ---
+        if (rawCategory.includes('mp_main')) {
+            category = 'mp_main';
+            displayCategory = '⚙️ MP主控';
+        } else if (rawCategory.includes('main') && !rawCategory.includes('mp_') || rawCategory === '123bot') {
+            // 排除 mp_main 后的 main
+            category = 'main';
+            displayCategory = '🤖 Bot核心';
+        } else if (rawCategory.includes('bot115')) {
+            category = 'bot115';
+            displayCategory = '📂 115';
+        } else if (rawCategory.includes('bot189')) {
+            category = 'bot189';
+            displayCategory = '☁️ 189';
+        } else if (rawCategory.includes('werkzeug')) {
+            category = 'werkzeug';
+            displayCategory = '🌐 Web';
+        } else {
+            category = 'other';
+            displayCategory = rawCategory;
+        }
+
     } else {
-        // 失败回退逻辑
-        if (line.includes('werkzeug')) category = 'werkzeug';
-        else if (line.includes('bot115')) category = 'bot115';
-        else if (line.includes('bot189')) category = 'bot189';
-        else if (line.includes('quark')) category = 'quark';
+        // --- 2. 非标准格式回退逻辑 (兜底识别) ---
+        // 核心修复：添加了对 mp_main 和 main 的关键词检测
+        if (line.includes('werkzeug')) { category = 'werkzeug'; displayCategory='🌐 Web'; }
+        else if (line.includes('bot115')) { category = 'bot115'; displayCategory='📂 115'; }
+        else if (line.includes('bot189')) { category = 'bot189'; displayCategory='☁️ 189'; }
+        else if (line.includes('mp_main') || line.includes('__mp_main__')) { category = 'mp_main'; displayCategory='⚙️ MP主控'; }
+        else if (line.includes('__main__') || line.includes('123bot')) { category = 'main'; displayCategory='🤖 Bot核心'; }
         
         if (line.includes('ERROR') || line.includes('Traceback')) level = 'ERROR';
         else if (line.includes('WARNING')) level = 'WARNING';
     }
 
-    // 判断显隐
+    // --- 3. 筛选判断逻辑 ---
     let isHidden = false;
-    if (filterValue !== 'all') {
-        if (category !== filterValue && !category.includes(filterValue)) isHidden = true;
-    } else {
+    
+    if (filterValue === 'all') {
+        // 检查 Werkzeug 屏蔽开关是否在 HTML 中存在 (假设 id 为 hide-werkzeug)
+        // 注意：applyLogFilter 会再次处理显隐，这里只做初始生成状态
+        // 为了性能，这里暂不读取 DOM 的 checked 状态，由 processLogBuffer 批量处理或者后续 applyLogFilter 处理
+        // 但为了初始显示正确，我们尽量读取一次：
+        const hideWerkzeug = document.getElementById('hide-werkzeug')?.checked;
         if (hideWerkzeug && (category === 'werkzeug' || line.includes(' /api/'))) isHidden = true;
+    } else if (filterValue === 'error') {
+        if (level !== 'ERROR' && !line.includes('Traceback')) isHidden = true;
+    } else if (filterValue === 'warning') {
+        if (level !== 'WARNING') isHidden = true;
+    } else {
+        // 按模块筛选
+        if (category !== filterValue) isHidden = true;
     }
 
+    // 构建 DOM
     const div = document.createElement('div');
     div.className = `log-entry level-${level} item-${category}`;
     if (isHidden) div.classList.add('hidden');
 
     if (isFormatted) {
         let modClass = 'mod-other';
-        if (category.includes('115')) modClass = 'mod-115';
-        else if (category.includes('189')) modClass = 'mod-189';
-        else if (category.includes('quark')) modClass = 'mod-quark';
-        else if (category.includes('main')) modClass = 'mod-main';
-        else if (category.includes('mp')) modClass = 'mod-mp';
-        else if (category.includes('werkzeug')) modClass = 'mod-web';
+        if (category === 'bot115') modClass = 'mod-115';
+        else if (category === 'bot189') modClass = 'mod-189';
+        else if (category === 'main') modClass = 'mod-main';
+        else if (category === 'mp_main') modClass = 'mod-mp';
+        else if (category === 'werkzeug') modClass = 'mod-web';
 
         // 高亮关键词
         let safeMsg = escapeHtml(msgStr)
             .replace(/(Successfully|Success|成功|完成|✅)/gi, '<span style="color:#67c23a;font-weight:bold;">$1</span>')
             .replace(/(Failed|Fail|Error|失败|错误|❌)/gi, '<span style="color:#f56c6c;font-weight:bold;">$1</span>')
-            .replace(/(\/s\/[a-zA-Z0-9]+)/g, '<span style="color:#e6a23c;">$1</span>'); // 高亮链接Key
+            .replace(/(\/s\/[a-zA-Z0-9]+)/g, '<span style="color:#e6a23c;">$1</span>'); 
 
         div.innerHTML = `
             <span class="log-time">${timeStr}</span>
-            <span class="log-badge ${modClass}">${category}</span>
+            <span class="log-badge ${modClass}">${displayCategory}</span>
             <span class="log-msg">${safeMsg}</span>
         `;
     } else {
-        // Traceback 或非标准行
+        // 堆栈/非标准行处理
         if (level === 'ERROR' || line.trim().startsWith('Traceback') || line.trim().startsWith('File "')) {
             div.classList.add('log-traceback');
         }
@@ -538,52 +550,61 @@ function createLogLineElement(line, filterValue, hideWerkzeug) {
 // 纯前端筛选应用 (切换下拉框时调用)
 function applyLogFilter() {
     const filterValue = document.getElementById('logFilter').value;
-    const hideWerkzeug = document.getElementById('hide-werkzeug').checked;
+    const hideWerkzeug = document.getElementById('hide-werkzeug')?.checked;
     
-    // 遍历当前 DOM 中所有日志行进行显隐切换
     const entries = document.querySelectorAll('.log-entry');
     entries.forEach(row => {
         let isHidden = false;
         
-        // 从 class 中提取 category
+        // 从 class 中提取 category 和 level
         let category = 'other';
-        row.classList.forEach(c => { if(c.startsWith('item-')) category = c.replace('item-', ''); });
+        let level = 'INFO';
+        
+        row.classList.forEach(c => { 
+            if(c.startsWith('item-')) category = c.replace('item-', '');
+            if(c.startsWith('level-')) level = c.replace('level-', '');
+        });
 
-        if (filterValue !== 'all') {
-            if (category !== filterValue && !category.includes(filterValue)) isHidden = true;
+        if (filterValue === 'all') {
+            if (hideWerkzeug && (category === 'werkzeug' || row.textContent.includes('HTTP/1.'))) isHidden = true;
+        } else if (filterValue === 'error') {
+            if (level !== 'ERROR' && !row.classList.contains('log-traceback')) isHidden = true;
+        } else if (filterValue === 'warning') {
+            if (level !== 'WARNING') isHidden = true;
         } else {
-            if (hideWerkzeug && (category === 'werkzeug' || category === 'other')) {
-                // 简单判定：如果是 werkzeug 或者是 other 且包含 HTTP 动词
-                if (category === 'werkzeug' || row.textContent.includes('HTTP/1.')) isHidden = true;
-            }
+            if (category !== filterValue) isHidden = true;
         }
 
         if (isHidden) row.classList.add('hidden');
         else row.classList.remove('hidden');
     });
     
-    // 筛选后滚动到底部
     const viewer = document.getElementById('log-viewer');
     if (document.getElementById('auto-scroll-log').checked) {
         viewer.scrollTop = viewer.scrollHeight;
     }
 }
 
-// 当用户切换到日志 Tab 时，自动开启流
-const logsTabBtn = document.querySelector('button[data-target="logs"]');
-if(logsTabBtn) {
-    logsTabBtn.addEventListener('click', () => {
-        // 延迟一点点，确保 DOM 切换完成
-        setTimeout(() => {
-            if(!eventSource) startLogStream();
-        }, 100);
-    });
+// 加载日志的初始调用（非流式，用于自动刷新逻辑）
+let logAutoRefreshInterval = null;
+function loadLogs() {
+    // 这里保留旧的 polling 逻辑供参考，或重定向到 startLogStream
+    // 如果已经在流模式下，点击刷新不应该重置
+    if(eventSource) return;
+    startLogStream();
 }
-
-// 页面卸载或切换 Tab 时可以考虑关闭流节省资源 (可选，这里暂时不加，保持后台监控)
-// window.addEventListener('beforeunload', stopLogStream);
 
 function escapeHtml(text) {
     if (!text) return '';
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
+
+document.getElementById('auto-refresh-log')?.addEventListener('change', function(e) {
+    if (e.target.checked) {
+        if(!eventSource) startLogStream();
+    } else {
+        // 如果取消自动刷新，是否要断开流？通常建议保持连接但停止滚动
+        // 这里根据用户习惯，如果是流式日志，自动刷新复选框其实对应的是“是否开启流”
+        if(eventSource) stopLogStream();
+    }
+});
