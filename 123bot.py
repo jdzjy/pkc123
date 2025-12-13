@@ -121,7 +121,6 @@ if __name__ == "__mp_main__":
     # 当前时间戳
     now = datetime.now().timestamp()
     # 如果当前时间在今天的atTime之前，则首次轮转时间为今天atTime
-    # 如果当前时间已过今天的atTime，则首次轮转时间为明天atTime
     if now < today_at_time:
         target_rollover = today_at_time
     else:
@@ -3066,7 +3065,6 @@ def handle_general_message(message):
             for url in target_urls:
                 try:
                     logger.info(f"正在解析天翼云链接元数据: {url}")
-                    # 获取文件快照 + 分享标题(作为根文件夹名)
                     files_in_share, root_share_name = get_share_file_snapshot(client189, url)
                     
                     all_rapid_success = False
@@ -3076,47 +3074,37 @@ def handle_general_message(message):
                         success_f = 0
                         logger.info(f"解析成功，共 {total_f} 个文件，准备秒传...")
                         
-                        # [关键] 文件夹ID全局缓存 (避免同一层级重复请求API)
-                        # Key: "父ID_文件夹名", Value: "文件夹ID"
-                        # 放在循环外，确保同一个分享链接内缓存共享
+
                         folder_cache = {} 
                         
                         for i, f_info in enumerate(files_in_share):
                             try:
-                                # === [核心逻辑] 构建完整目录链 ===
+
                                 raw_path = f_info.get('path', '').strip('/')
                                 path_parts = raw_path.split('/')
                                 
-                                # 2. 提取文件名: "007.mp4"
+
                                 file_name = path_parts.pop() 
-                                
-                                # 3. 构建目录列表: ["我的资源", "动作片", "007系列"]
-                                # 将 "分享标题" 作为第一层，剩下的 path_parts 作为后续层级
+
                                 dir_chain = []
                                 if root_share_name:
                                     dir_chain.append(root_share_name)
-                                dir_chain.extend([p for p in path_parts if p]) # 追加剩余路径
+                                dir_chain.extend([p for p in path_parts if p]) 
                                 
-                                # 4. 逐级递归创建/查找目录
-                                current_pid = pid_for_123 # 从配置的根目录开始
+
+                                current_pid = pid_for_123 
                                 
                                 for folder_name in dir_chain:
-                                    # 生成缓存Key (确保父ID和文件夹名唯一确定一个子文件夹)
-                                    cache_key = f"{current_pid}_{folder_name}"
-                                    
-                                    # A. 查本地缓存 (速度最快，支持嵌套的关键)
+                                    cache_key = f"{current_pid}_{folder_name}"                                    
                                     if cache_key in folder_cache:
                                         current_pid = folder_cache[cache_key]
                                         continue
                                     
-                                    # B. 查云端 / 创建
                                     found_id = find_child_folder_id(client123, current_pid, folder_name)
                                     if found_id:
-                                        # 存在 -> 记录缓存，进入下一级
                                         folder_cache[cache_key] = found_id
                                         current_pid = found_id
                                     else:
-                                        # 不存在 -> 创建
                                         try:
                                             resp = client123.fs_mkdir(folder_name, parent_id=current_pid)
                                             if resp.get("code") == 0:
@@ -3129,7 +3117,6 @@ def handle_general_message(message):
                                         except Exception:
                                             pass
 
-                                # === 5. 执行秒传 (到最后一级目录) ===
                                 resp = client123.upload_file_fast(
                                     file_name=file_name,
                                     parent_id=current_pid, 
@@ -3151,10 +3138,9 @@ def handle_general_message(message):
                         if success_f == total_f and total_f > 0:
                             all_rapid_success = True
                             success_count += 1
-                            reply_thread_pool.submit(send_reply, message, f"✅ 123云盘极速秒传成功！\n📁 目录: {root_share_name}\n链接: {url}\n✨ 完美保留多层级目录结构")
+                            reply_thread_pool.submit(send_reply, message, f"✅ 123云盘极速秒传成功！\n📁 目录: {root_share_name}\n链接: {url}\n✨ 零流量 · 秒级传输 · 不占空间")
                             continue 
                     
-                    # 2. 秒传失败，走兜底转存 (保存到 189)
                     if not all_rapid_success:
                         logger.info("123秒传未完全覆盖，执行转存到天翼云盘...")
                         if files_in_share:
@@ -5145,8 +5131,7 @@ def main():
     
     schedule.every(20).seconds.do(check_task)
 
-    if get_int_env("ENV_189_TGMONITOR_SWITCH", 0):
-        
+    if get_int_env("ENV_189_TGMONITOR_SWITCH", 0):        
         try:            
             # 读取189清理配置
             env_189_clear_pid = os.getenv("ENV_189_CLEAR_PID", "")
@@ -5294,10 +5279,18 @@ def main():
                                 tg_115monitor()
                             except Exception as e:
                                 # [关键] 捕获异常，只打印日志，不让程序退出
-                                logger.error(f"115监控任务出错 (已跳过，防止容器重启): {str(e)}")          
-            
+                                logger.error(f"115监控任务出错 (已跳过，防止容器重启): {str(e)}")   
+
+
+           
             if get_int_env("ENV_189_TGMONITOR_SWITCH", 0):
                 try:
+                    load_dotenv(dotenv_path="db/user.env", override=True)
+                    channel_check = os.getenv("ENV_189_TG_CHANNEL", "")
+                    if not channel_check:
+                        logger.error("❌ 主程序检测到 ENV_189_TG_CHANNEL 为空！")
+                    else:
+                        logger.info(f"✅ 主程序确认开启189监控，频道: {channel_check}")
                     # 直接调用本文件定义的 tg_189monitor (上面那个全能版)
                     tg_189monitor(client189)
                 except Exception as e:
